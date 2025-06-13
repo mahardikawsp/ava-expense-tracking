@@ -87,6 +87,7 @@ Jawab dalam format JSON seperti ini:
 }
 
 Jika query tidak jelas atau tidak berkaitan dengan data keuangan, return null.`;
+      console.log(prompt, 'prompt ai')
 
       const completion = await this.openai.chat.completions.create({
         model: "gpt-3.5-turbo",
@@ -101,6 +102,7 @@ Jika query tidak jelas atau tidak berkaitan dengan data keuangan, return null.`;
       });
 
       const response = completion.choices[0]?.message?.content?.trim();
+      console.log(response, 'apa responya')
 
       if (!response || response === 'null') {
         return null;

@@ -12,6 +12,7 @@ interface TransactionData {
   category: string;
   source: string;
   pocket: string;
+  sender: string
 }
 
 @Injectable()
@@ -144,20 +145,21 @@ export class GoogleSheetsService {
         'Description',
         'Category',
         'Pocket',
-        'Source'
+        'Source',
+        'Sender'
       ];
 
       // Check if headers exist
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: this.spreadsheetId,
-        range: 'A1:H1',
+        range: 'A1:I1',
       });
 
       if (!response.data.values || response.data.values.length === 0) {
         // Add headers
         await this.sheets.spreadsheets.values.update({
           spreadsheetId: this.spreadsheetId,
-          range: 'A1:H1',
+          range: 'A1:I1',
           valueInputOption: 'USER_ENTERED',
           requestBody: {
             values: [headers],
@@ -181,13 +183,14 @@ export class GoogleSheetsService {
           data.description,
           data.category,
           data.pocket,
-          data.source
+          data.source,
+          data.sender
         ]
       ];
 
       await this.sheets.spreadsheets.values.append({
         spreadsheetId: this.spreadsheetId,
-        range: 'A:H',
+        range: 'A:I',
         valueInputOption: 'USER_ENTERED',
         insertDataOption: 'INSERT_ROWS',
         requestBody: {
@@ -206,7 +209,7 @@ export class GoogleSheetsService {
     try {
       const response = await this.sheets.spreadsheets.values.get({
         spreadsheetId: this.spreadsheetId,
-        range: `A2:H${limit + 1}`, // Skip header row
+        range: `A2:I${limit + 1}`, // Skip header row
       });
 
       const rawData = response.data.values || [];
@@ -220,7 +223,8 @@ export class GoogleSheetsService {
         description: row[4] || '',
         category: row[5] || '',
         pocket: row[6] || 'default',
-        source: row[7] || ''
+        source: row[7] || '',
+        sender: row[8] || 'anonimous'
       }));
     } catch (error) {
       console.error('Error getting transactions from Google Sheets:', error);
@@ -252,17 +256,45 @@ export class GoogleSheetsService {
       transactions.forEach(t => {
         const pocket = t.pocket || 'default';
         const amount = parseFloat(t.amount || '0');
+        const sender = t.sender
 
         if (!pocketBalances[pocket]) {
           pocketBalances[pocket] = 0;
         }
 
         pocketBalances[pocket] += t.type === 'Income' ? amount : -amount;
+        pocketBalances[sender] = sender
       });
 
       return pocketBalances;
     } catch (error) {
       console.error('Error getting all pocket balances:', error);
+      throw error;
+    }
+  }
+
+  async getAllPocketBalancesWithSenders(): Promise<{ [key: string]: { balance: number; sender: string } }> {
+    try {
+      const transactions = await this.getTransactions();
+      const pocketData: { [key: string]: { balance: number; sender: string } } = {};
+
+      transactions.forEach(t => {
+        const pocket = t.pocket || 'default';
+        const amount = parseFloat(t.amount || '0');
+        const sender = t.sender || 'anonimous';
+
+        if (!pocketData[pocket]) {
+          pocketData[pocket] = { balance: 0, sender: sender };
+        }
+
+        pocketData[pocket].balance += t.type === 'Income' ? amount : -amount;
+        // Keep the most recent sender for this pocket
+        pocketData[pocket].sender = sender;
+      });
+
+      return pocketData;
+    } catch (error) {
+      console.error('Error getting all pocket balances with senders:', error);
       throw error;
     }
   }

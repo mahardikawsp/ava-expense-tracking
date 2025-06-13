@@ -8,16 +8,39 @@ import * as moment from 'moment';
 @Injectable()
 export class WhatsappService implements OnModuleInit {
     private client: Client;
+    private reconnectAttempts = 0;
+    private maxReconnectAttempts = 5;
+    private isReconnecting = false;
+    private reconnectTimeout: NodeJS.Timeout | null = null;
 
     constructor(
         private readonly googleSheetsService: GoogleSheetsService,
         private readonly openaiService: OpenaiService,
     ) {
+        this.initializeClient();
+    }
+
+    private initializeClient() {
         this.client = new Client({
             authStrategy: new LocalAuth(),
             puppeteer: {
                 headless: true,
-                args: ['--no-sandbox', '--disable-setuid-sandbox'],
+                args: [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-accelerated-2d-canvas',
+                    '--no-first-run',
+                    '--no-zygote',
+                    '--single-process',
+                    '--disable-gpu',
+                    '--disable-background-timer-throttling',
+                    '--disable-backgrounding-occluded-windows',
+                    '--disable-renderer-backgrounding',
+                    '--disable-features=TranslateUI',
+                    '--disable-ipc-flooding-protection'
+                ],
+                timeout: 60000,
             },
         });
     }
@@ -27,48 +50,123 @@ export class WhatsappService implements OnModuleInit {
     }
 
     private async initializeWhatsApp() {
-        this.client.on('qr', (qr) => {
-            console.log('QR Code received, scan with your phone:');
-            qrcode.generate(qr, { small: true });
-        });
+        try {
+            this.client.on('qr', (qr) => {
+                console.log('QR Code received, scan with your phone:');
+                qrcode.generate(qr, { small: true });
+            });
 
-        this.client.on('ready', () => {
-            console.log('WhatsApp bot is ready!');
-        });
+            this.client.on('ready', () => {
+                console.log('WhatsApp bot is ready!');
+                this.reconnectAttempts = 0; // Reset reconnection attempts on successful connection
+                this.isReconnecting = false;
+            });
 
-        this.client.on('message', async (message: Message) => {
-            await this.handleMessage(message);
-        });
+            this.client.on('message', async (message: Message) => {
+                try {
+                    await this.handleMessage(message);
+                } catch (error) {
+                    console.error('Error handling message:', error);
+                    // Don't throw here to prevent client disconnection
+                }
+            });
 
-        this.client.on('authenticated', () => {
-            console.log('WhatsApp authenticated successfully');
-        });
+            this.client.on('authenticated', () => {
+                console.log('WhatsApp authenticated successfully');
+            });
 
-        this.client.on('auth_failure', (msg) => {
-            console.error('Authentication failed:', msg);
-        });
+            this.client.on('auth_failure', (msg) => {
+                console.error('Authentication failed:', msg);
+                this.handleReconnection('auth_failure');
+            });
 
-        this.client.on('disconnected', (reason) => {
-            console.log('WhatsApp disconnected:', reason);
-        });
+            this.client.on('disconnected', (reason) => {
+                console.log('WhatsApp disconnected:', reason);
+                this.handleReconnection('disconnected', reason);
+            });
 
-        await this.client.initialize();
+            // Add error handler for protocol errors
+            this.client.on('error', (error) => {
+                console.error('WhatsApp client error:', error);
+                if (error.message.includes('Protocol error') || error.message.includes('Execution context was destroyed')) {
+                    this.handleReconnection('protocol_error', error.message);
+                }
+            });
+
+            await this.client.initialize();
+        } catch (error) {
+            console.error('Error initializing WhatsApp:', error);
+            this.handleReconnection('initialization_error', error.message);
+        }
+    }
+
+    private async handleReconnection(reason: string, details?: string) {
+        if (this.isReconnecting) {
+            console.log('Reconnection already in progress, skipping...');
+            return;
+        }
+
+        this.isReconnecting = true;
+        console.log(`Connection issue detected: ${reason}${details ? ` - ${details}` : ''}`);
+
+        // Clear any existing timeout
+        if (this.reconnectTimeout) {
+            clearTimeout(this.reconnectTimeout);
+        }
+
+        this.reconnectAttempts++;
+
+        if (this.reconnectAttempts <= this.maxReconnectAttempts) {
+            const delay = Math.min(5000 * this.reconnectAttempts, 30000); // Exponential backoff, max 30s
+            console.log(`🔄 Attempting to reconnect in ${delay / 1000} seconds... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+
+            this.reconnectTimeout = setTimeout(async () => {
+                try {
+                    // Destroy current client
+                    if (this.client) {
+                        try {
+                            await this.client.destroy();
+                        } catch (destroyError) {
+                            console.log('Error destroying client:', destroyError);
+                        }
+                    }
+
+                    // Reinitialize client
+                    this.initializeClient();
+                    await this.initializeWhatsApp();
+                } catch (error) {
+                    console.error('Reconnection failed:', error);
+                    this.isReconnecting = false;
+                    // Try again if we haven't reached max attempts
+                    if (this.reconnectAttempts < this.maxReconnectAttempts) {
+                        this.handleReconnection('reconnection_failed', error.message);
+                    }
+                }
+            }, delay);
+        } else {
+            console.error(`❌ Max reconnection attempts (${this.maxReconnectAttempts}) reached. Please restart manually.`);
+            this.isReconnecting = false;
+        }
     }
 
     private async handleMessage(message: Message) {
+        const sender = await message.getContact().then((data) => ({
+            name: data.pushname
+        }));
         const body = message.body.trim().toLowerCase();
+        console.log(body, 'body')
 
         // Check if message starts with /pemasukan or /pengeluaran
-        if (body.startsWith('/pemasukan') || body.startsWith('/pengeluaran')) {
-            await this.processFinanceMessage(message);
+        if (body.startsWith('pemasukan') || body.startsWith('pengeluaran')) {
+            await this.processFinanceMessage(message, sender.name);
         }
         // Check for data queries
         else if (this.isDataQuery(body)) {
             console.log('masuk data query');
-            await this.processDataQuery(message);
+            await this.processDataQuery(message, sender.name);
         }
         // Help command
-        else if (body === '/help' || body === '/bantuan') {
+        else if (body === 'help' || body === 'bantuan') {
             console.log('masuk sini help')
             await this.sendHelpMessage(message);
         }
@@ -84,7 +182,7 @@ export class WhatsappService implements OnModuleInit {
         return dataKeywords.some(keyword => body.includes(keyword));
     }
 
-    private async processDataQuery(message: Message) {
+    private async processDataQuery(message: Message, sender: string) {
         try {
             const body = message.body.trim().toLowerCase();
 
@@ -102,23 +200,24 @@ export class WhatsappService implements OnModuleInit {
 
             // Check for transfer between pockets
             if (body.includes('transfer') && body.includes('pocket')) {
-                await this.processPocketTransfer(message);
+                await this.processPocketTransfer(message, sender);
                 return;
             }
 
             // Regular data queries
             const queryIntent = await this.openaiService.interpretDataQuery(message.body.trim());
+            console.log(queryIntent, 'query')
 
             if (!queryIntent) {
                 await message.reply(`Maaf, saya tidak mengerti permintaan Anda. 
     
-    🔍 Perintah yang tersedia:
-    • "Berapa pengeluaran minggu ini?"
-    • "Saldo pocket utama"
-    • "List pocket"
-    • "Transfer 100rb dari pocket utama ke pocket harian"
-    
-    Ketik /help untuk melihat semua perintah.`);
+🔍 Perintah yang tersedia:
+• "Berapa pengeluaran minggu ini?"
+• "Saldo pocket utama"
+• "List pocket"
+• "Transfer 100rb dari pocket utama ke pocket harian"
+
+Ketik /help untuk melihat semua perintah.`);
                 return;
             }
 
@@ -186,12 +285,13 @@ export class WhatsappService implements OnModuleInit {
 
     private async processPocketListQuery(message: Message) {
         try {
-            const pocketSummary = await this.googleSheetsService.getAllPocketBalances();
+            const pocketSummary = await this.googleSheetsService.getAllPocketBalancesWithSenders();
+            console.log(pocketSummary, 'pocket summary')
 
             let response = '📝 DAFTAR POCKET:\n\n';
-            Object.entries(pocketSummary).forEach(([pocket, balance]) => {
-                const status = balance > 0 ? '✅' : balance === 0 ? '⚪' : '❌';
-                response += `${status} ${pocket}: Rp ${balance.toLocaleString('id-ID')}\n`;
+            Object.entries(pocketSummary).forEach(([pocket, data]) => {
+                const status = data.balance > 0 ? '✅' : data.balance === 0 ? '⚪' : '❌';
+                response += `${status} ${pocket}: Rp ${data.balance.toLocaleString('id-ID')} | by ${data.sender}\n`;
             });
 
             response += '\n💡 Tips:\n';
@@ -206,7 +306,7 @@ export class WhatsappService implements OnModuleInit {
         }
     }
 
-    private async processPocketTransfer(message: Message) {
+    private async processPocketTransfer(message: Message, sender: string) {
         try {
             const body = message.body.trim();
             const transferData = this.parseTransferCommand(body);
@@ -246,7 +346,8 @@ export class WhatsappService implements OnModuleInit {
                 description: `Transfer ke pocket ${toPocket}`,
                 category: 'Transfer',
                 pocket: fromPocket,
-                source: 'WhatsApp Bot - Transfer'
+                source: 'WhatsApp Bot - Transfer',
+                sender
             };
 
             // Incoming transaction
@@ -258,7 +359,8 @@ export class WhatsappService implements OnModuleInit {
                 description: `Transfer dari pocket ${fromPocket}`,
                 category: 'Transfer',
                 pocket: toPocket,
-                source: 'WhatsApp Bot - Transfer'
+                source: 'WhatsApp Bot - Transfer',
+                sender
             };
 
             // Save both transactions
@@ -270,10 +372,10 @@ export class WhatsappService implements OnModuleInit {
             const newToBalance = await this.googleSheetsService.getPocketBalance(toPocket);
 
             const confirmationMessage = `✅ Transfer berhasil!
-    💸 Dari: ${fromPocket} → Rp ${newFromBalance.toLocaleString('id-ID')}
-    💰 Ke: ${toPocket} → Rp ${newToBalance.toLocaleString('id-ID')}
-    💵 Jumlah: Rp ${amount.toLocaleString('id-ID')}
-    📅 Waktu: ${currentDate} ${currentTime}`;
+💸 Dari: ${fromPocket} → Rp ${newFromBalance.toLocaleString('id-ID')}
+💰 Ke: ${toPocket} → Rp ${newToBalance.toLocaleString('id-ID')}
+💵 Jumlah: Rp ${amount.toLocaleString('id-ID')}
+📅 Waktu: ${currentDate} ${currentTime}`;
 
             await message.reply(confirmationMessage);
 
@@ -327,15 +429,21 @@ export class WhatsappService implements OnModuleInit {
 
         // Top categories for expenses
         if (expense.length > 0) {
+            console.log(expense, 'pengeluaran')
             const expenseByCategory = this.groupByCategory(expense);
+            console.log(expenseByCategory, 'pengeluaran by kategori')
             const topExpenses = Object.entries(expenseByCategory)
                 .sort(([, a], [, b]) => b - a)
-                .slice(0, 5);
+            // .slice(0, 5);
 
             report += `📉 TOP PENGELUARAN:\n`;
             topExpenses.forEach(([category, amount]) => {
                 report += `• ${category}: Rp ${amount.toLocaleString('id-ID')}\n`;
             });
+            report += `📉 LIST PENGELUARAN:\n`;
+            expense.map((data) => {
+                report += `• Kategori: ${data.category} | Rp ${parseFloat(data.amount).toLocaleString('id-ID')} | ${data.description} | ${data.pocket} | \n ${data.date} ${data.time} | by ${data.sender}\n`
+            })
         }
 
         // Income categories if any
@@ -345,6 +453,10 @@ export class WhatsappService implements OnModuleInit {
             Object.entries(incomeByCategory).forEach(([category, amount]) => {
                 report += `• ${category}: Rp ${amount.toLocaleString('id-ID')}\n`;
             });
+            report += `📉 LIST PEMASUKAN:\n`;
+            income.map((data) => {
+                report += `• Kategori: ${data.category} | Rp ${parseFloat(data.amount).toLocaleString('id-ID')} | ${data.description} | ${data.pocket} | \n ${data.date} ${data.time} | by ${data.sender}\n`
+            })
         }
 
         report += `\n📊 Total Transaksi: ${transactions.length}`;
@@ -362,57 +474,59 @@ export class WhatsappService implements OnModuleInit {
     private async sendHelpMessage(message: Message) {
         const helpText = `🤖 WhatsApp Finance Bot - Bantuan
     
-    📝 MENCATAT TRANSAKSI:
-    • /pemasukan [jumlah] [deskripsi] ke pocket [nama]
-      Contoh: /pemasukan 500rb gaji bulanan ke pocket utama
-    
-    • /pengeluaran [jumlah] [deskripsi] dari pocket [nama]  
-      Contoh: /pengeluaran 25rb makan siang dari pocket harian
-    
-    💰 FORMAT JUMLAH:
-    • 10rb = 10.000 • 100k = 100.000 • 1jt = 1.000.000
-    
-    👝 POCKET MANAGEMENT:
-    • "Saldo pocket [nama]" - Lihat saldo pocket tertentu
-    • "Saldo pocket" - Lihat semua pocket
-    • "List pocket" - Daftar semua pocket
-    • "Transfer 100rb dari pocket utama ke pocket harian"
-    
-    📊 MELIHAT LAPORAN:
-    • "Berapa pengeluaran minggu ini?"
-    • "Total pemasukan bulan ini"
-    • "Laporan keuangan tahun ini"
-    • "Pengeluaran hari ini"
-    
-    💡 TIPS POCKET:
-    • Pocket otomatis dibuat saat transaksi pertama
-    • Contoh nama pocket: utama, harian, bulanan, darurat
-    • Bot akan cek saldo pocket sebelum pengeluaran
-    • Transfer antar pocket untuk mengatur uang
-    
-    Ketik /help untuk melihat pesan ini lagi.`;
+📝 MENCATAT TRANSAKSI:
+• /pemasukan [jumlah] [deskripsi] ke pocket [nama]
+Contoh: /pemasukan 500rb gaji bulanan ke pocket utama
+
+• /pengeluaran [jumlah] [deskripsi] dari pocket [nama]  
+Contoh: /pengeluaran 25rb makan siang dari pocket harian
+
+💰 FORMAT JUMLAH:
+• 10rb = 10.000 • 100k = 100.000 • 1jt = 1.000.000
+
+👝 POCKET MANAGEMENT:
+• "Saldo pocket [nama]" - Lihat saldo pocket tertentu
+• "Saldo pocket" - Lihat semua pocket
+• "List pocket" - Daftar semua pocket
+• "Transfer 100rb dari pocket utama ke pocket harian"
+
+📊 MELIHAT LAPORAN:
+• "Berapa pengeluaran minggu ini?"
+• "Total pemasukan bulan ini"
+• "Laporan keuangan tahun ini"
+• "Pengeluaran hari ini"
+
+💡 TIPS POCKET:
+• Pocket otomatis dibuat saat transaksi pertama
+• Contoh nama pocket: utama, harian, bulanan, darurat
+• Bot akan cek saldo pocket sebelum pengeluaran
+• Transfer antar pocket untuk mengatur uang
+
+Ketik /help untuk melihat pesan ini lagi.`;
 
         await message.reply(helpText);
     }
 
-    private async processFinanceMessage(message: Message) {
+    private async processFinanceMessage(message: Message, sender: string) {
         try {
             const body = message.body.trim();
             const parts = body.split(' ');
 
             if (parts.length < 3) {
                 await message.reply(`Format tidak valid. Gunakan:
-    📥 /pemasukan [jumlah] [deskripsi] ke pocket [nama_pocket]
-    📤 /pengeluaran [jumlah] [deskripsi] dari pocket [nama_pocket]
-    
-    Contoh:
-    • /pemasukan 500rb gaji bulanan ke pocket utama
-    • /pengeluaran 25rb makan siang dari pocket harian`);
+📥 pemasukan [jumlah] [deskripsi] ke pocket [nama_pocket]
+📤 pengeluaran [jumlah] [deskripsi] dari pocket [nama_pocket]
+
+Contoh:
+• pemasukan 500rb gaji bulanan ke pocket utama
+• pengeluaran 25rb makan siang dari pocket harian`);
                 return;
             }
 
             const type = parts[0].replace('/', ''); // pemasukan or pengeluaran
+            // const type = parts[0]
             const amountStr = parts[1];
+            console.log(type, amountStr, 'berapa sih')
 
             // Parse pocket information
             const bodyLower = body.toLowerCase();
@@ -449,9 +563,9 @@ export class WhatsappService implements OnModuleInit {
                 const pocketBalance = await this.googleSheetsService.getPocketBalance(pocket);
                 if (pocketBalance < amount) {
                     await message.reply(`❌ Saldo pocket "${pocket}" tidak mencukupi!
-    💰 Saldo saat ini: Rp ${pocketBalance.toLocaleString('id-ID')}
-    💸 Yang dibutuhkan: Rp ${amount.toLocaleString('id-ID')}
-    📊 Ketik "saldo pocket ${pocket}" untuk melihat detail`);
+💰 Saldo saat ini: Rp ${pocketBalance.toLocaleString('id-ID')}
+💸 Yang dibutuhkan: Rp ${amount.toLocaleString('id-ID')}
+📊 Ketik "saldo pocket ${pocket}" untuk melihat detail`);
                     return;
                 }
             }
@@ -468,7 +582,8 @@ export class WhatsappService implements OnModuleInit {
                 description: description,
                 category: category,
                 pocket: pocket,
-                source: 'WhatsApp Bot'
+                source: 'WhatsApp Bot',
+                sender
             };
 
             // Save to Google Sheets
@@ -479,13 +594,13 @@ export class WhatsappService implements OnModuleInit {
 
             // Send confirmation
             const confirmationMessage = `✅ Transaksi berhasil dicatat!
-    📅 Tanggal: ${transactionData.date} ${transactionData.time}
-    💰 Jenis: ${transactionData.type}
-    💵 Jumlah: Rp ${amount.toLocaleString('id-ID')}
-    📝 Deskripsi: ${description}
-    🏷️ Kategori: ${category}
-    👝 Pocket: ${pocket}
-    💳 Saldo pocket "${pocket}": Rp ${newBalance.toLocaleString('id-ID')}`;
+📅 Tanggal: ${transactionData.date} ${transactionData.time}
+💰 Jenis: ${transactionData.type}
+💵 Jumlah: Rp ${amount.toLocaleString('id-ID')}
+📝 Deskripsi: ${description}
+🏷️ Kategori: ${category}
+👝 Pocket: ${pocket}
+💳 Saldo pocket "${pocket}": Rp ${newBalance.toLocaleString('id-ID')}`;
 
             await message.reply(confirmationMessage);
 
@@ -496,12 +611,15 @@ export class WhatsappService implements OnModuleInit {
     }
     private parseAmount(amountStr: string): number | null {
         const cleanStr = amountStr.toLowerCase();
+        console.log(amountStr, 'amount')
 
         // Handle 'rb' suffix (ribu/thousand) with decimal support
         if (cleanStr.includes('rb') || cleanStr.includes('ribu')) {
             // Replace comma with dot for decimal parsing, then remove 'rb' or 'ribu'
             const numberStr = cleanStr.replace(',', '.').replace(/rb|ribu/g, '');
+            console.log(numberStr, 'number str')
             const number = parseFloat(numberStr);
+            console.log(number, 'berapa nomor')
             return isNaN(number) ? null : number * 1000;
         }
 
