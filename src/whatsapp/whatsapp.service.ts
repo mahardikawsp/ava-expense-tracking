@@ -494,30 +494,60 @@ export class WhatsappService implements OnModuleInit {
             await message.reply('Terjadi kesalahan saat memproses transaksi. Silakan coba lagi.');
         }
     }
-
     private parseAmount(amountStr: string): number | null {
-        const cleanStr = amountStr.toLowerCase().replace(/[.,]/g, '');
+        const cleanStr = amountStr.toLowerCase();
 
-        // Handle 'rb' suffix (ribu/thousand)
+        // Handle 'rb' suffix (ribu/thousand) with decimal support
         if (cleanStr.includes('rb') || cleanStr.includes('ribu')) {
-            const number = parseFloat(cleanStr.replace(/[^0-9]/g, ''));
+            // Replace comma with dot for decimal parsing, then remove 'rb' or 'ribu'
+            const numberStr = cleanStr.replace(',', '.').replace(/rb|ribu/g, '');
+            const number = parseFloat(numberStr);
             return isNaN(number) ? null : number * 1000;
         }
 
-        // Handle 'k' suffix (thousand)
+        // Handle 'k' suffix (thousand) with decimal support
         if (cleanStr.includes('k')) {
-            const number = parseFloat(cleanStr.replace(/[^0-9]/g, ''));
+            const numberStr = cleanStr.replace(',', '.').replace('k', '');
+            const number = parseFloat(numberStr);
             return isNaN(number) ? null : number * 1000;
         }
 
-        // Handle 'jt' or 'juta' suffix (million)
+        // Handle 'jt' or 'juta' suffix (million) with decimal support
         if (cleanStr.includes('jt') || cleanStr.includes('juta')) {
-            const number = parseFloat(cleanStr.replace(/[^0-9]/g, ''));
+            const numberStr = cleanStr.replace(',', '.').replace(/jt|juta/g, '');
+            const number = parseFloat(numberStr);
             return isNaN(number) ? null : number * 1000000;
         }
 
-        // Handle regular numbers
-        const number = parseFloat(cleanStr.replace(/[^0-9]/g, ''));
+        // Handle regular numbers with decimal support
+        const numberStr = cleanStr.replace(',', '.');
+        const number = parseFloat(numberStr);
         return isNaN(number) ? null : number;
     }
+
+    // private parseAmount(amountStr: string): number | null {
+    //     const cleanStr = amountStr.toLowerCase().replace(/[.,]/g, '');
+
+    //     // Handle 'rb' suffix (ribu/thousand)
+    //     if (cleanStr.includes('rb') || cleanStr.includes('ribu')) {
+    //         const number = parseFloat(cleanStr.replace(/[^0-9]/g, ''));
+    //         return isNaN(number) ? null : number * 1000;
+    //     }
+
+    //     // Handle 'k' suffix (thousand)
+    //     if (cleanStr.includes('k')) {
+    //         const number = parseFloat(cleanStr.replace(/[^0-9]/g, ''));
+    //         return isNaN(number) ? null : number * 1000;
+    //     }
+
+    //     // Handle 'jt' or 'juta' suffix (million)
+    //     if (cleanStr.includes('jt') || cleanStr.includes('juta')) {
+    //         const number = parseFloat(cleanStr.replace(/[^0-9]/g, ''));
+    //         return isNaN(number) ? null : number * 1000000;
+    //     }
+
+    //     // Handle regular numbers
+    //     const number = parseFloat(cleanStr.replace(/[^0-9]/g, ''));
+    //     return isNaN(number) ? null : number;
+    // }
 }
